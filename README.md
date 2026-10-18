@@ -55,6 +55,22 @@ node api/index.mjs              # serves http://localhost:3001 (PORT to override
 
 Without `DATABASE_URL` the API starts with an in-memory demo store (data resets on restart or cold start). With it, the real `vaults` and `milestones` tables are used and `activity_log` is created on first request. The first request seeds three demo vaults into an empty database.
 
+### Running API Integration Tests Locally
+
+The integration tests under `api/__tests__/` test the deployed serverless API routes against either a real Postgres database or the fallback in-memory store.
+
+1. **Against local Postgres (via Docker):**
+   ```bash
+   docker run -d --name disciplr-postgres -e POSTGRES_PASSWORD=password -e POSTGRES_DB=disciplr_test -p 5432:5432 postgres:16
+   DATABASE_URL=postgres://postgres:password@localhost:5432/disciplr_test npm run migrate:latest
+   DATABASE_URL=postgres://postgres:password@localhost:5432/disciplr_test npm run test:api
+   ```
+
+2. **Against the in-memory store:**
+   ```bash
+   npm run test:api
+   ```
+
 Full service (optional): `npm run dev` (needs the variables documented in `docs/configuration.md`). Tests: `npm test`. OpenAPI for the full service: `npm run openapi:generate`.
 
 ## Environment variables
