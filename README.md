@@ -7,7 +7,8 @@ API and milestone engine for **Disciplr**: programmable, time-locked commitment 
 
 - **Live API and docs:** https://disciplr-api.vercel.app
 - **OpenAPI spec:** https://disciplr-api.vercel.app/api/openapi.json
-- **Frontend:** [Disciplr-Frontend](https://github.com/Disciplr-Org/Disciplr-Frontend) (consumes this API; its Vercel deployment is pending a free-plan upload limit reset)
+- **Live demo (frontend):** https://disciplr-frontend.vercel.app
+- **Frontend repo:** [Disciplr-Frontend](https://github.com/Disciplr-Org/Disciplr-Frontend) (consumes this API), live at https://disciplr-frontend.vercel.app
 
 ## Quick try
 
