@@ -115,14 +115,8 @@ exports.up = async function up(knex) {
   }
   log('fix_end_date_index', 'success')
 
-  // ── Step 4b: index supporting org-scoped cursor pagination ────────────────
-  log('add_org_pagination_index', 'start')
-  if (!(await indexExists(knex, 'idx_vaults_org_id_created_at'))) {
-    await knex.schema.alterTable('vaults', (t) => {
-      t.index(['org_id', 'created_at'], 'idx_vaults_org_id_created_at')
-    })
-  }
-  log('add_org_pagination_index', 'success')
+  // Step 4b (org pagination index) moved to 20260425140000_add_organization_id_to_vaults,
+  // because the org column does not exist yet at this point in the migration order.
 
   // ── Step 5: add 'draft' to vault_status enum ───────────────────────────────
   // ALTER TYPE … ADD VALUE cannot run inside a transaction on PG < 12.
