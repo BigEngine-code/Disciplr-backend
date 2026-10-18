@@ -62,7 +62,7 @@ router.post('/vaults', wrap(async (req, res) => {
   const now = new Date().toISOString()
   const s = await getStore()
   const vault = {
-    id, creator: b.creator, amount: String(amount), status: 'active', startDate: start.toISOString(), endDate: end.toISOString(),
+    id, name: String(b.name || '').trim().slice(0, 200) || `Vault ${amount}`, creator: b.creator, amount: String(amount), status: 'active', startDate: start.toISOString(), endDate: end.toISOString(),
     verifier: b.verifier, successDestination: STELLAR.test(b.successDestination || '') ? b.successDestination : b.creator,
     failureDestination: STELLAR.test(b.failureDestination || '') ? b.failureDestination : b.verifier,
     createdAt: now, updatedAt: now, milestones,

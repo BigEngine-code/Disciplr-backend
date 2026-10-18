@@ -10,8 +10,8 @@ const hex = (n) => randomBytes(n).toString('hex')
 
 function seed() {
   const now = Date.now()
-  const mk = (id, creator, amount, status, startOff, endOff, ms) => ({
-    id, creator, amount: String(amount), status,
+  const mk = (id, name, creator, amount, status, startOff, endOff, ms) => ({
+    id, name, creator, amount: String(amount), status,
     startDate: iso(now + startOff * DAY), endDate: iso(now + endOff * DAY),
     verifier: 'GVERIFIERDEMOXQ2K5H4D6F7NVERIFIERDEMOXQ2K5H4D6F7NVERIFIE',
     successDestination: creator, failureDestination: 'GFAILUREDEMOHJKLMNPQRSTUVWFAILUREDEMOHJKLMNPQRSTUVWFAILU',
@@ -20,9 +20,9 @@ function seed() {
   })
   const creator = 'GCREATORDEMOFHJKMNPQRSTVWXYZCREATORDEMOFHJKMNPQRSTVWXYZC'
   const vaults = [
-    mk('vault-demo-001', creator, 2500, 'active', -20, 40, [['Ship MVP', 1000, 10, 'completed'], ['Reach 100 users', 1000, 25, 'pending'], ['Public launch', 500, 40, 'pending']]),
-    mk('vault-demo-002', creator, 800, 'completed', -60, -5, [['Finish thesis draft', 400, -30, 'completed'], ['Submit thesis', 400, -5, 'completed']]),
-    mk('vault-demo-003', creator, 1200, 'failed', -90, -10, [['Run 3x per week for 8 weeks', 1200, -10, 'failed']]),
+    mk('vault-demo-001', 'Launch the MVP', creator, 2500, 'active', -20, 40, [['Ship MVP', 1000, 10, 'completed'], ['Reach 100 users', 1000, 25, 'pending'], ['Public launch', 500, 40, 'pending']]),
+    mk('vault-demo-002', 'Finish the thesis', creator, 800, 'completed', -60, -5, [['Finish thesis draft', 400, -30, 'completed'], ['Submit thesis', 400, -5, 'completed']]),
+    mk('vault-demo-003', 'Run 3x per week', creator, 1200, 'failed', -90, -10, [['Run 3x per week for 8 weeks', 1200, -10, 'failed']]),
   ]
   const activity = [
     { id: randomUUID(), type: 'create', vaultId: 'vault-demo-001', amount: '2500', status: 'confirmed', hash: hex(32), memo: 'Vault created', createdAt: vaults[0].createdAt },
@@ -59,6 +59,8 @@ class PgStore {
     await this.pool.query(`CREATE TABLE IF NOT EXISTS activity_log (
       id uuid PRIMARY KEY, type text NOT NULL, vault_id text NOT NULL, amount numeric(36,7) NOT NULL DEFAULT 0,
       status text NOT NULL DEFAULT 'confirmed', hash text NOT NULL, memo text, created_at timestamptz NOT NULL DEFAULT now())`)
+    await this.pool.query('ALTER TABLE vaults ADD COLUMN IF NOT EXISTS name varchar(200)')
+    for (const v of seed().vaults) await this.pool.query('UPDATE vaults SET name=$2 WHERE id=$1 AND name IS NULL', [v.id, v.name])
     const { rows } = await this.pool.query('SELECT count(*)::int AS n FROM vaults')
     if (rows[0].n === 0) {
       const s = seed()
@@ -68,7 +70,7 @@ class PgStore {
   }
   rowToVault(r, ms) {
     return {
-      id: r.id, creator: r.creator, amount: String(Number(r.amount)), status: r.status, startDate: iso(r.start_date), endDate: iso(r.end_date),
+      id: r.id, name: r.name || `Vault ${r.id}`, creator: r.creator, amount: String(Number(r.amount)), status: r.status, startDate: iso(r.start_date), endDate: iso(r.end_date),
       verifier: r.verifier, successDestination: r.success_destination, failureDestination: r.failure_destination,
       createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
       milestones: ms.filter((m) => m.vault_id === r.id).sort((a, b) => a.sort_order - b.sort_order)
@@ -94,9 +96,9 @@ class PgStore {
     const c = await this.pool.connect()
     try {
       await c.query('BEGIN')
-      await c.query(`INSERT INTO vaults (id, creator, amount, start_date, end_date, verifier, success_destination, failure_destination, status, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::vault_status,$10,$10)`,
-      [v.id, v.creator, v.amount, v.startDate, v.endDate, v.verifier, v.successDestination, v.failureDestination, v.status, v.createdAt])
+      await c.query(`INSERT INTO vaults (id, name, creator, amount, start_date, end_date, verifier, success_destination, failure_destination, status, created_at, updated_at)
+        VALUES ($1,$11,$2,$3,$4,$5,$6,$7,$8,$9::vault_status,$10,$10)`,
+      [v.id, v.creator, v.amount, v.startDate, v.endDate, v.verifier, v.successDestination, v.failureDestination, v.status, v.createdAt, v.name])
       let i = 0
       for (const m of v.milestones) {
         await c.query(`INSERT INTO milestones (id, vault_id, title, target_amount, amount, deadline, due_date, status, sort_order)
