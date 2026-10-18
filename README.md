@@ -22,7 +22,8 @@ curl https://disciplr-api.vercel.app/api/stats
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/health` | Service status and active data store (`postgres` or `memory`) |
+| GET | `/api/health` | Process liveness, independent of database availability |
+| GET | `/api/ready` | Database readiness, active store and latest applied migration; 503 during outages |
 | GET | `/api/vaults?creator=&status=` | List vaults with milestones |
 | POST | `/api/vaults` | Create a vault (`creator`, `verifier`, `amount`, `endDate`, `milestones[]`) |
 | GET | `/api/vaults/:id` | Vault detail with activity |
@@ -53,7 +54,7 @@ npm run migrate:latest          # applies the Knex migrations in db/migrations
 node api/index.mjs              # serves http://localhost:3001 (PORT to override)
 ```
 
-Without `DATABASE_URL` the API starts with an in-memory demo store (data resets on restart or cold start). With it, the real `vaults` and `milestones` tables are used and `activity_log` is created on first request. The first request seeds three demo vaults into an empty database.
+Without `DATABASE_URL`, non-production uses an in-memory demo store (data resets on restart or cold start); production fails closed. `STORE_MODE=memory` explicitly opts into demo mode. With a database URL, connection failures return 503 with `Retry-After` and later requests retry; they never switch to demo memory. The real `vaults` and `milestones` tables are used and `activity_log` is created on first request. The first request seeds three demo vaults into an empty database.
 
 Full service (optional): `npm run dev` (needs the variables documented in `docs/configuration.md`). Tests: `npm test`. OpenAPI for the full service: `npm run openapi:generate`.
 
@@ -62,6 +63,9 @@ Full service (optional): `npm run dev` (needs the variables documented in `docs/
 | Name | Required | Description |
 | --- | --- | --- |
 | `DATABASE_URL` | for Postgres | PostgreSQL connection URL (Neon pooled URL in production) |
+| `STORE_MODE` | no | `postgres` or explicit `memory`; defaults to Postgres when a URL is set or in production |
+| `DATABASE_CA_CERT` | no | PEM CA certificate for remote Postgres; remote TLS verifies certificates by default |
+| `DATABASE_SSL_INSECURE` | no | Only `1` disables certificate verification and logs a warning; loopback hosts use no TLS |
 | `PORT` | no | Local port for `node api/index.mjs` (default 3001) |
 
 ## Deployment
