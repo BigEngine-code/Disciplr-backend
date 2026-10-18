@@ -13,12 +13,12 @@ function seed() {
   const mk = (id, name, creator, amount, status, startOff, endOff, ms) => ({
     id, name, creator, amount: String(amount), status,
     startDate: iso(now + startOff * DAY), endDate: iso(now + endOff * DAY),
-    verifier: 'GVERIFIERDEMOXQ2K5H4D6F7NVERIFIERDEMOXQ2K5H4D6F7NVERIFIE',
-    successDestination: creator, failureDestination: 'GFAILUREDEMOHJKLMNPQRSTUVWFAILUREDEMOHJKLMNPQRSTUVWFAILU',
+    verifier: 'GDLYZ73G3GEF36HBLEBFXOXAP5IXJDRQCRG47JCKR4XAXNOFCU44NZT2',
+    successDestination: creator, failureDestination: 'GCAJ2QOEXTR7AB5PJXSAO2HEISE2VEIUIX7CP3F3MOYVX7GMADB7KX22',
     createdAt: iso(now + startOff * DAY), updatedAt: iso(now + startOff * DAY),
     milestones: ms.map((m, i) => ({ id: `${id}-m${i + 1}`, title: m[0], amount: String(m[1]), dueDate: iso(now + m[2] * DAY), status: m[3] })),
   })
-  const creator = 'GCREATORDEMOFHJKMNPQRSTVWXYZCREATORDEMOFHJKMNPQRSTVWXYZC'
+  const creator = 'GBVAQKGA5P4TIZSZJBS5AW3XNJOTYG6I3Y5CLIGCBBUZDHMVF7YE7XCQ'
   const vaults = [
     mk('vault-demo-001', 'Launch the MVP', creator, 2500, 'active', -20, 40, [['Ship MVP', 1000, 10, 'completed'], ['Reach 100 users', 1000, 25, 'pending'], ['Public launch', 500, 40, 'pending']]),
     mk('vault-demo-002', 'Finish the thesis', creator, 800, 'completed', -60, -5, [['Finish thesis draft', 400, -30, 'completed'], ['Submit thesis', 400, -5, 'completed']]),
@@ -60,7 +60,11 @@ class PgStore {
       id uuid PRIMARY KEY, type text NOT NULL, vault_id text NOT NULL, amount numeric(36,7) NOT NULL DEFAULT 0,
       status text NOT NULL DEFAULT 'confirmed', hash text NOT NULL, memo text, created_at timestamptz NOT NULL DEFAULT now())`)
     await this.pool.query('ALTER TABLE vaults ADD COLUMN IF NOT EXISTS name varchar(200)')
-    for (const v of seed().vaults) await this.pool.query('UPDATE vaults SET name=$2 WHERE id=$1 AND name IS NULL', [v.id, v.name])
+    for (const v of seed().vaults) {
+      await this.pool.query('UPDATE vaults SET name=$2 WHERE id=$1 AND name IS NULL', [v.id, v.name])
+      await this.pool.query('UPDATE vaults SET creator=$2, verifier=$3, success_destination=$4, failure_destination=$5 WHERE id=$1 AND creator<>$2',
+        [v.id, v.creator, v.verifier, v.successDestination, v.failureDestination])
+    }
     const { rows } = await this.pool.query('SELECT count(*)::int AS n FROM vaults')
     if (rows[0].n === 0) {
       const s = seed()

@@ -2,13 +2,12 @@
 
 [![CI](https://github.com/Disciplr-Org/Disciplr-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/Disciplr-Org/Disciplr-backend/actions/workflows/ci.yml)
 [![Live API](https://img.shields.io/badge/live-API-3ddc97)](https://disciplr-api.vercel.app)
-[![Frontend](https://img.shields.io/badge/live-frontend-7c9cff)](https://disciplr-frontend.vercel.app)
 
 API and milestone engine for **Disciplr**: programmable, time-locked commitment vaults on Stellar. A creator locks funds against milestones, a verifier validates progress, and funds release to a success destination or redirect to a failure destination.
 
 - **Live API and docs:** https://disciplr-api.vercel.app
 - **OpenAPI spec:** https://disciplr-api.vercel.app/api/openapi.json
-- **Live demo (frontend):** https://disciplr-frontend.vercel.app ([repo](https://github.com/Disciplr-Org/Disciplr-Frontend))
+- **Frontend:** [Disciplr-Frontend](https://github.com/Disciplr-Org/Disciplr-Frontend) (consumes this API; its Vercel deployment is pending a free-plan upload limit reset)
 
 ## Quick try
 
