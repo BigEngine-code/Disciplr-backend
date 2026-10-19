@@ -1,3 +1,5 @@
+// Must run before any module that reads DATABASE_URL at load time.
+import './helpers/useTestDatabaseUrl.js'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, jest } from '@jest/globals'
 import { createRequire } from 'node:module'
 import type { Knex } from 'knex'
@@ -18,6 +20,10 @@ const vaultIds = {
   verified: 'expiry-settlement-verified',
   concurrent: 'expiry-settlement-concurrent',
 }
+
+// Needs a real Postgres (CI provides TEST_DATABASE_URL); skip otherwise.
+const hasTestDatabase = Boolean(process.env.TEST_DATABASE_URL)
+const describeDb = hasTestDatabase ? describe : describe.skip
 
 let testDb: Knex
 const submitSlashMock = jest.fn<(...args: unknown[]) => Promise<{ txHash: string }>>()
@@ -65,6 +71,7 @@ const runSettlementJob = async (): Promise<void> => {
 }
 
 beforeAll(async () => {
+  if (!hasTestDatabase) return
   testDb = await setupTestDatabase()
   process.env.SOROBAN_CONTRACT_ID = 'C'.repeat(56)
   process.env.SOROBAN_NETWORK_PASSPHRASE = 'Test SDF Network ; September 2015'
@@ -79,6 +86,7 @@ beforeAll(async () => {
 })
 
 beforeEach(async () => {
+  if (!hasTestDatabase) return
   delete process.env.DRY_RUN
   submitSlashMock.mockReset()
   submitSlashMock.mockResolvedValue({ txHash: 'expiryTxHash123456789' })
@@ -93,7 +101,7 @@ afterAll(async () => {
   if (testDb) await teardownTestDatabase(testDb)
 })
 
-describe('expired vault settlement ledger', () => {
+describeDb('expired vault settlement ledger', () => {
   it('marks expired unverified vaults and creates one pending redirect, leaving future and verified vaults alone', async () => {
     await insertVault(vaultIds.expired, new Date('2020-02-01T00:00:00Z'))
     await insertMilestone('expiry-settlement-ms-expired', vaultIds.expired, 'pending')
