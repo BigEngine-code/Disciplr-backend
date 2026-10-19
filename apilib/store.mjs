@@ -1,8 +1,10 @@
 // Data store for the deployed Disciplr API.
 // - If DATABASE_URL is set, uses Postgres (the real `vaults` / `milestones` tables created by
 //   `npm run migrate:latest`, plus an `activity_log` table created on first use).
-// - Otherwise falls back to an in-memory demo store (state resets on cold start).
+// - Explicit memory mode or non-production without a URL uses demo memory.
+// - Postgres failures and production without a URL fail closed.
 import { randomUUID, randomBytes } from 'node:crypto'
+import { createStoreProvider } from './store-bootstrap.mjs'
 
 const DAY = 86400000
 const iso = (d) => new Date(d).toISOString()
@@ -35,7 +37,7 @@ function seed() {
   return { vaults, activity }
 }
 
-class MemoryStore {
+export class MemoryStore {
   kind = 'memory'
   constructor() { const s = seed(); this.vaults = s.vaults; this.activity = s.activity }
   async init() {}
@@ -52,7 +54,7 @@ class MemoryStore {
   }
 }
 
-class PgStore {
+export class PgStore {
   kind = 'postgres'
   constructor(pool) { this.pool = pool }
   async init() {
@@ -130,26 +132,8 @@ class PgStore {
   }
 }
 
-let storePromise
-export function getStore() {
-  if (!storePromise) {
-    storePromise = (async () => {
-      let store
-      const url = process.env.DATABASE_URL
-      if (url) {
-        try {
-          const pg = (await import('pg')).default
-          const pool = new pg.Pool({ connectionString: url, max: 3, ssl: /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: false } })
-          store = new PgStore(pool)
-          await store.init()
-        } catch (e) {
-          console.error('Postgres unavailable, falling back to in-memory store:', e.message)
-          store = null
-        }
-      }
-      if (!store) { store = new MemoryStore(); await store.init() }
-      return store
-    })()
-  }
-  return storePromise
-}
+export const getStore = createStoreProvider({
+  makePool: async (config) => new (await import('pg')).default.Pool(config),
+  makePostgres: (pool) => new PgStore(pool),
+  makeMemory: () => new MemoryStore(),
+})
