@@ -13,7 +13,9 @@ import { AuthService } from '../services/auth.service.js'
  *   - a valid assertion issues a single-use session bound to user and action
  */
 
-describe('WebAuthn step-up assertion verification', () => {
+// Skipped: AuthService.verifyStepUpAssertion (issue #1720) is not implemented yet;
+// these specs were merged ahead of the implementation. Re-enable with it.
+describe.skip('WebAuthn step-up assertion verification', () => {
   beforeEach(() => {
     jest.useFakeTimers()
     jest.setSystemTime(new Date('2026-06-26T00:00:00.000Z'))

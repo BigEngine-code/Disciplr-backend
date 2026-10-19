@@ -362,7 +362,8 @@ export const createSettlementOperation = async (
       operation_key: input.operationKey,
       operation_type: input.operationType,
       requested_by: input.requestedBy.trim(),
-      request_fingerprint: fingerprint,
+      // jsonb column: encode the hex digest as a JSON string literal.
+      request_fingerprint: JSON.stringify(fingerprint),
     })
     .onConflict([scopeColumn, 'operation_key'])
     .ignore()
