@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { validate } from '@seriousme/openapi-schema-validator'
+import { Validator } from '@seriousme/openapi-schema-validator'
 import { OPENAPI } from '../openapi.mjs'
 
 test('apilib/openapi.mjs is a valid OpenAPI 3.0 document', async () => {
-  const result = await validate(OPENAPI)
+  const validator = new Validator()
+  const result = await validator.validate(OPENAPI)
   if (!result.valid) {
     console.error('OpenAPI specification validation errors:', result.errors)
   }

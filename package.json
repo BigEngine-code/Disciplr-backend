@@ -24,7 +24,7 @@
     "openapi:typecheck": "tsc --noEmit -p tsconfig.docs.json",
     "openapi:lint": "redocly lint docs/openapi.yaml",
     "openapi:validate": "redocly stats docs/openapi.yaml",
-    "openapi:validate-deployed": "node --test apilib/__tests__/",
+    "openapi:validate-deployed": "node --test apilib/__tests__/openapi.spec.test.mjs",
     "openapi:check": "tsx src/docs/generate-spec.ts --check"
   },
   "dependencies": {

@@ -517,7 +517,7 @@ export const OPENAPI = {
           amount: { $ref: '#/components/schemas/Amount' },
           status: { type: 'string', example: 'confirmed' },
           hash: { type: 'string', example: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08' },
-          memo: { type: ['string', 'null'], example: 'Vault created' },
+          memo: { type: 'string', nullable: true, example: 'Vault created' },
           createdAt: { type: 'string', format: 'date-time', example: '2026-03-31T12:00:00.000Z' },
         },
       },
@@ -584,7 +584,7 @@ export const OPENAPI = {
           totalLocked: { type: 'number', example: 2500 },
           totalReleased: { type: 'number', example: 800 },
           totalRedirected: { type: 'number', example: 1200 },
-          successRate: { type: ['number', 'null'], example: 50 },
+          successRate: { type: 'number', nullable: true, example: 50 },
         },
       },
       VaultEnvelope: {
