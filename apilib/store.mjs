@@ -8,6 +8,14 @@ const DAY = 86400000
 const iso = (d) => new Date(d).toISOString()
 const hex = (n) => randomBytes(n).toString('hex')
 
+export class StoreConflictError extends Error {
+  constructor(message, details = {}) {
+    super(message)
+    this.name = 'StoreConflictError'
+    this.details = details
+  }
+}
+
 function seed() {
   const now = Date.now()
   const mk = (id, name, creator, amount, status, startOff, endOff, ms) => ({
@@ -37,7 +45,12 @@ function seed() {
 
 class MemoryStore {
   kind = 'memory'
-  constructor() { const s = seed(); this.vaults = s.vaults; this.activity = s.activity }
+  constructor() {
+    const s = seed();
+    this.vaults = s.vaults;
+    this.activity = s.activity;
+    this.transitionLocks = new Map();
+  }
   async init() {}
   async listVaults({ creator, status } = {}) {
     return this.vaults.filter((v) => (!creator || v.creator === creator) && (!status || v.status === status))
@@ -45,8 +58,64 @@ class MemoryStore {
   }
   async getVault(id) { return this.vaults.find((v) => v.id === id) || null }
   async createVault(v) { this.vaults.push(v); return v }
-  async saveVault(v) { v.updatedAt = iso(Date.now()); return v }
+  async saveVault(v) {
+    const idx = this.vaults.findIndex((item) => item.id === v.id)
+    if (idx >= 0) {
+      this.vaults[idx] = { ...this.vaults[idx], ...v, updatedAt: iso(Date.now()) }
+    }
+    return v
+  }
   async addActivity(a) { this.activity.push(a); return a }
+  async addActivityTx(_client, a) { return this.addActivity(a) }
+  async transition(vaultId, fn) {
+    const currentLock = this.transitionLocks.get(vaultId) ?? Promise.resolve()
+    let release
+    const nextLock = new Promise((resolve) => { release = resolve })
+    this.transitionLocks.set(vaultId, currentLock.then(() => nextLock))
+    await currentLock
+    try {
+      const index = this.vaults.findIndex((v) => v.id === vaultId)
+      if (index < 0) return null
+      const current = this.vaults[index]
+      const draft = JSON.parse(JSON.stringify(current))
+      const result = await fn(draft)
+      if (!result || typeof result !== 'object') {
+        throw new Error('Transition callback must return an object.')
+      }
+      if (result.conflict) {
+        throw new StoreConflictError(result.error || 'Concurrent update detected', { vaultStatus: current.status, vaultId })
+      }
+      const milestoneMap = new Map(current.milestones.map((m) => [m.id, m]))
+      const updates = Array.isArray(result.milestoneUpdates) ? result.milestoneUpdates : []
+      const nextStatuses = new Map()
+      for (const update of updates) {
+        const item = milestoneMap.get(update.id)
+        if (!item) throw new Error(`Milestone ${update.id} not found while applying transition.`)
+        if (item.status !== update.status) {
+          nextStatuses.set(update.id, update.status)
+        }
+      }
+      const finalVault = {
+        ...current,
+        status: result.vaultStatus ?? current.status,
+        updatedAt: iso(Date.now()),
+        milestones: current.milestones.map((m) => ({
+          ...m,
+          status: nextStatuses.has(m.id) ? nextStatuses.get(m.id) : m.status,
+        })),
+      }
+      this.vaults[index] = finalVault
+      if (Array.isArray(result.activities)) {
+        this.activity.push(...result.activities)
+      }
+      return { ...result, vaultStatus: finalVault.status, vault: finalVault, activities: result.activities ?? [] }
+    } finally {
+      release()
+      if (this.transitionLocks.get(vaultId) === nextLock) {
+        this.transitionLocks.delete(vaultId)
+      }
+    }
+  }
   async listActivity({ vaultId } = {}) {
     return this.activity.filter((a) => !vaultId || a.vaultId === vaultId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }
@@ -122,6 +191,70 @@ class PgStore {
       [a.id, a.type, a.vaultId, a.amount, a.status, a.hash, a.memo, a.createdAt])
     return a
   }
+  async addActivityTx(client, a) {
+    await client.query('INSERT INTO activity_log (id,type,vault_id,amount,status,hash,memo,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [a.id, a.type, a.vaultId, a.amount, a.status, a.hash, a.memo, a.createdAt])
+    return a
+  }
+  async transition(vaultId, fn) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const vaultRow = await client.query('SELECT * FROM vaults WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [vaultId])
+      if (!vaultRow.rows[0]) {
+        await client.query('ROLLBACK')
+        return null
+      }
+      const milestoneRows = await client.query('SELECT * FROM milestones WHERE vault_id = $1 AND deleted_at IS NULL ORDER BY sort_order ASC FOR UPDATE', [vaultId])
+      const currentVault = this.rowToVault(vaultRow.rows[0], milestoneRows.rows)
+      const draft = JSON.parse(JSON.stringify(currentVault))
+      const result = await fn(draft)
+      if (!result || typeof result !== 'object') {
+        throw new Error('Transition callback must return an object.')
+      }
+      if (result.conflict) {
+        throw new StoreConflictError(result.error || 'Concurrent update detected', { vaultStatus: currentVault.status, vaultId })
+      }
+
+      const appliedStatusById = new Map(currentVault.milestones.map((m) => [m.id, m.status]))
+      const finalStatus = result.vaultStatus ?? currentVault.status
+      const updates = Array.isArray(result.milestoneUpdates) ? result.milestoneUpdates : []
+      for (const update of updates) {
+        if (!appliedStatusById.has(update.id)) {
+          throw new Error(`Milestone ${update.id} not found while applying transition.`)
+        }
+        const stale = appliedStatusById.get(update.id)
+        if (stale === update.status) continue
+        const row = await client.query(
+          'UPDATE milestones SET status=$2::milestone_status, updated_at=now() WHERE id=$1 AND status=$3::milestone_status AND deleted_at IS NULL',
+          [update.id, update.status, stale],
+        )
+        if (row.rowCount !== 1) {
+          throw new StoreConflictError(`Milestone ${update.id} changed concurrently`, { vaultStatus: currentVault.status, milestoneId: update.id, vaultId })
+        }
+        appliedStatusById.set(update.id, update.status)
+      }
+      if (finalStatus !== currentVault.status) {
+        const row = await client.query(
+          'UPDATE vaults SET status=$2::vault_status, updated_at=now() WHERE id=$1 AND status=$3::vault_status',
+          [vaultId, finalStatus, currentVault.status],
+        )
+        if (row.rowCount !== 1) {
+          throw new StoreConflictError(`Vault ${vaultId} changed concurrently`, { vaultStatus: currentVault.status, vaultId })
+        }
+      }
+      for (const activity of Array.isArray(result.activities) ? result.activities : []) {
+        await this.addActivityTx(client, activity)
+      }
+      await client.query('COMMIT')
+      return { ...result, vaultStatus: finalStatus, vault: { ...currentVault, status: finalStatus, milestones: currentVault.milestones.map((m) => ({ ...m, status: appliedStatusById.get(m.id) ?? m.status })) }, activities: result.activities ?? [] }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => null)
+      throw error
+    } finally {
+      client.release()
+    }
+  }
   async listActivity({ vaultId } = {}) {
     const { rows } = vaultId
       ? await this.pool.query('SELECT * FROM activity_log WHERE vault_id=$1 ORDER BY created_at DESC LIMIT 200', [vaultId])
@@ -152,4 +285,9 @@ export function getStore() {
     })()
   }
   return storePromise
+}
+
+export async function resetStore() {
+  storePromise = null
+  return getStore()
 }

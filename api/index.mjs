@@ -2,7 +2,7 @@
 import express from 'express'
 import cors from 'cors'
 import { randomBytes } from 'node:crypto'
-import { getStore } from '../apilib/store.mjs'
+import { getStore, StoreConflictError } from '../apilib/store.mjs'
 import { OPENAPI } from '../apilib/openapi.mjs'
 
 const app = express()
@@ -75,36 +75,102 @@ router.post('/vaults', wrap(async (req, res) => {
 // Verifier validates a milestone. When every milestone is validated the vault completes and funds release.
 router.post('/vaults/:id/milestones/:mid/validate', wrap(async (req, res) => {
   const s = await getStore()
-  const v = await s.getVault(req.params.id)
-  if (!v) return bad(res, 'Vault not found', 404)
-  if (v.status !== 'active') return bad(res, `Vault is ${v.status}`, 409)
-  if (req.body?.verifier !== v.verifier) return bad(res, 'Only the vault verifier may validate milestones', 403)
-  const m = v.milestones.find((x) => x.id === req.params.mid)
-  if (!m) return bad(res, 'Milestone not found', 404)
-  if (m.status === 'completed') return bad(res, 'Milestone already validated', 409)
-  m.status = 'completed'
-  const now = new Date().toISOString()
-  await s.addActivity({ id: crypto.randomUUID(), type: 'validate', vaultId: v.id, amount: m.amount, status: 'confirmed', hash: hex(32), memo: `Milestone validated: ${m.title}`, createdAt: now })
-  if (v.milestones.every((x) => x.status === 'completed')) {
-    v.status = 'completed'
-    await s.addActivity({ id: crypto.randomUUID(), type: 'release', vaultId: v.id, amount: v.amount, status: 'confirmed', hash: hex(32), memo: 'Funds released to success destination', createdAt: new Date(Date.now() + 1).toISOString() })
+  const vault = await s.getVault(req.params.id)
+  if (!vault) return bad(res, 'Vault not found', 404)
+  if (req.body?.verifier !== vault.verifier) return bad(res, 'Only the vault verifier may validate milestones', 403)
+  const target = vault.milestones.find((x) => x.id === req.params.mid)
+  if (!target) return bad(res, 'Milestone not found', 404)
+  if (vault.status !== 'active') return bad(res, `Vault is ${vault.status}`, 409)
+  if (target.status === 'completed') return bad(res, 'Milestone already validated', 409)
+  if (target.status === 'failed' || target.status === 'cancelled') return bad(res, `Milestone is ${target.status}`, 409)
+
+  try {
+    const result = await s.transition(vault.id, async (current) => {
+      const liveVault = current
+      if (!liveVault) return { conflict: true, error: 'Vault not found', vaultStatus: 'active', milestoneUpdates: [], activities: [] }
+      if (liveVault.status !== 'active') return { conflict: true, error: `Vault is ${liveVault.status}`, vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+      const milestone = liveVault.milestones.find((m) => m.id === req.params.mid)
+      if (!milestone) return { conflict: true, error: 'Milestone not found', vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+      if (milestone.status === 'completed') return { conflict: true, error: 'Milestone already validated', vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+      if (milestone.status === 'failed' || milestone.status === 'cancelled') return { conflict: true, error: `Milestone is ${milestone.status}`, vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+
+      const updatedMilestone = { ...milestone, status: 'completed' }
+      const milestoneUpdates = [{ id: updatedMilestone.id, status: 'completed' }]
+      const activities = [{
+        id: crypto.randomUUID(),
+        type: 'validate',
+        vaultId: liveVault.id,
+        amount: updatedMilestone.amount,
+        status: 'confirmed',
+        hash: hex(32),
+        memo: `Milestone validated: ${updatedMilestone.title}`,
+        createdAt: new Date().toISOString(),
+      }]
+
+      let vaultStatus = liveVault.status
+      if (liveVault.milestones.every((m) => m.id === updatedMilestone.id || m.status === 'completed')) {
+        vaultStatus = 'completed'
+        activities.push({
+          id: crypto.randomUUID(),
+          type: 'release',
+          vaultId: liveVault.id,
+          amount: liveVault.amount,
+          status: 'confirmed',
+          hash: hex(32),
+          memo: 'Funds released to success destination',
+          createdAt: new Date(Date.now() + 1).toISOString(),
+        })
+      }
+      return { vaultStatus, milestoneUpdates, activities }
+    })
+
+    if (!result) return bad(res, 'Vault not found', 404)
+    res.json({ data: result.vault })
+  } catch (error) {
+    if (error instanceof StoreConflictError) return bad(res, error.message, 409)
+    throw error
   }
-  await s.saveVault(v)
-  res.json({ data: v })
 }))
 
 // Verifier (or creator) declares failure: funds redirect to the failure destination.
 router.post('/vaults/:id/fail', wrap(async (req, res) => {
   const s = await getStore()
-  const v = await s.getVault(req.params.id)
-  if (!v) return bad(res, 'Vault not found', 404)
-  if (v.status !== 'active') return bad(res, `Vault is ${v.status}`, 409)
-  if (req.body?.verifier !== v.verifier) return bad(res, 'Only the vault verifier may fail a vault', 403)
-  v.status = 'failed'
-  v.milestones.forEach((m) => { if (m.status !== 'completed') m.status = 'failed' })
-  await s.addActivity({ id: crypto.randomUUID(), type: 'redirect', vaultId: v.id, amount: v.amount, status: 'confirmed', hash: hex(32), memo: 'Funds redirected to failure destination', createdAt: new Date().toISOString() })
-  await s.saveVault(v)
-  res.json({ data: v })
+  const vault = await s.getVault(req.params.id)
+  if (!vault) return bad(res, 'Vault not found', 404)
+  if (req.body?.verifier !== vault.verifier) return bad(res, 'Only the vault verifier may fail a vault', 403)
+  if (vault.status !== 'active') return bad(res, `Vault is ${vault.status}`, 409)
+
+  try {
+    const result = await s.transition(vault.id, async (current) => {
+      const liveVault = current
+      if (!liveVault) return { conflict: true, error: 'Vault not found', vaultStatus: 'active', milestoneUpdates: [], activities: [] }
+      if (liveVault.status !== 'active') return { conflict: true, error: `Vault is ${liveVault.status}`, vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+      const milestoneUpdates = liveVault.milestones.map((m) => ({
+        id: m.id,
+        status: m.status === 'completed' ? 'completed' : 'failed',
+      }))
+      return {
+        vaultStatus: 'failed',
+        milestoneUpdates,
+        activities: [{
+          id: crypto.randomUUID(),
+          type: 'redirect',
+          vaultId: liveVault.id,
+          amount: liveVault.amount,
+          status: 'confirmed',
+          hash: hex(32),
+          memo: 'Funds redirected to failure destination',
+          createdAt: new Date().toISOString(),
+        }],
+      }
+    })
+
+    if (!result) return bad(res, 'Vault not found', 404)
+    res.json({ data: result.vault })
+  } catch (error) {
+    if (error instanceof StoreConflictError) return bad(res, error.message, 409)
+    throw error
+  }
 }))
 
 router.get('/transactions', wrap(async (req, res) => {
