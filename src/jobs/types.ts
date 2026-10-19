@@ -14,6 +14,7 @@ export const JOB_TYPES = [
   'outbox.relay',
   'embeddings.reindex',
   'saved-search.evaluate',
+  'settlement.process',
 ] as const
 
 export type JobType = (typeof JOB_TYPES)[number]
@@ -91,6 +92,9 @@ export interface SavedSearchEvaluateJobPayload {
   searchId?: string
   batchSize?: number
 }
+export interface SettlementProcessJobPayload {
+  batchSize?: number
+}
 export interface JobPayloadByType {
   'notification.send': NotificationJobPayload
   'deadline.check': DeadlineCheckJobPayload
@@ -107,6 +111,7 @@ export interface JobPayloadByType {
   'outbox.relay': OutboxRelayJobPayload
   'embeddings.reindex': EmbeddingsReindexJobPayload
   'saved-search.evaluate': SavedSearchEvaluateJobPayload
+  'settlement.process': SettlementProcessJobPayload
 }
 
 export interface JobContext {
@@ -271,6 +276,8 @@ export const isPayloadForJobType = (
         (payload.searchId === undefined || typeof payload.searchId === 'string') &&
         (payload.batchSize === undefined || (typeof payload.batchSize === 'number' && payload.batchSize > 0))
       )
+    case 'settlement.process':
+      return payload.batchSize === undefined || (typeof payload.batchSize === 'number' && payload.batchSize > 0)
     default:
       return false
   }

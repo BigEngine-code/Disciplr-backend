@@ -5,9 +5,13 @@ import type { EnqueueOptions, JobHandler, JobHandlerRegistry, JobPayloadByType, 
 import { TransactionETLService } from '../services/transactionETL.js'
 import { MilestoneEmbeddingSource, ReindexCursorStore } from '../services/evidenceReindex.js'
 import { EmbeddingProvider } from '../services/embeddingProvider.js'
-import { buildSlashOnMissPayload } from '../services/soroban.js'
+import { submitSlash } from '../services/soroban.js'
 import {
-  markVaultExpiries,
+  confirmSettlementOperation,
+  markSettlementSubmitted,
+  recordSettlementAttemptFailure,
+} from '../services/settlementOperations.js'
+import {
   sendMilestoneReminders,
   sendMilestoneDigestReminders,
   processDeferredReminders,
@@ -88,20 +92,97 @@ export const createDefaultJobHandlers = (
 
   jobHandlers['deadline.check'] = async (payload, context) => {
     await sleep(30)
-    const expiredCount = await markVaultExpiries({ limit: 100 })
     const target = payload.vaultId ?? 'all-active-vaults'
     const deadline = payload.deadlineIso ?? 'not-provided'
     logJob(
       'deadline.check',
-      `checked target=${target} deadline=${deadline} expired=${expiredCount} source=${payload.triggerSource} attempt=${context.attempt}`,
+      `checked target=${target} deadline=${deadline} source=${payload.triggerSource} attempt=${context.attempt}`,
     )
-    if (payload.vaultId) {
-      const sorobanPayload = buildSlashOnMissPayload(payload.vaultId)
-      logJob(
-        'deadline.check',
-        `slash_on_miss built vault=${payload.vaultId} status=${sorobanPayload.submission.status}`,
-      )
+  }
+
+  jobHandlers['settlement.process'] = async (payload, context) => {
+    if (process.env.DRY_RUN === 'true') {
+      logJob('settlement.process', `DRY_RUN: submission skipped attempt=${context.attempt}`)
+      return
     }
+
+    const batchSize = Math.min(Math.max(payload.batchSize ?? 20, 1), 100)
+    const maxAttempts = 5
+    await db.transaction(async (trx) => {
+      const operations = await trx('settlement_operations')
+        .whereIn('status', ['pending', 'submitted'])
+        .whereNotNull('vault_id')
+        .orderBy('created_at')
+        .limit(batchSize)
+        .forUpdate()
+        .skipLocked()
+
+      for (const operation of operations) {
+        if (operation.status === 'submitted') {
+          await confirmSettlementOperation(operation.id, operation.transaction_hash, trx)
+          logJob('settlement.process', `recovered confirmation operation=${operation.id} tx=${operation.transaction_hash}`)
+          continue
+        }
+
+        try {
+          const result = await submitSlash(operation.vault_id, operation.target_milestone_id)
+          if (result.submission.status === 'success' && result.submission.txHash) {
+            await markSettlementSubmitted(operation.id, result.submission.txHash, trx)
+            await confirmSettlementOperation(operation.id, result.submission.txHash, trx)
+            logJob('settlement.process', `confirmed operation=${operation.id} tx=${result.submission.txHash}`)
+            continue
+          }
+
+          const message = result.submission.error ?? 'Soroban submission is not configured'
+          const nonRetryable = /contract|notactive|disputed|paused|deadline.?not.?reached/i.test(message)
+          const networkFailure = /network|connection|timeout|rpc|fetch|socket/i.test(message)
+          const nextAttempt = Number(operation.attempt_count) + 1
+          const terminal = nonRetryable || nextAttempt >= maxAttempts
+          const failureCode = nonRetryable ? 'CONTRACT_REJECTED' :
+            result.submission.status === 'not_configured' ? 'SOROBAN_NOT_CONFIGURED' :
+              networkFailure ? 'NETWORK_ERROR' : 'SOROBAN_SUBMISSION_FAILED'
+          const updated = await recordSettlementAttemptFailure(
+            operation.id,
+            terminal && !nonRetryable ? 'RETRY_LIMIT_EXCEEDED' : failureCode,
+            message.slice(0, 2000),
+            terminal,
+            trx,
+          )
+          if (terminal) {
+            console.error(JSON.stringify({
+              level: 'alert',
+              message: 'settlement_operation_dead_lettered',
+              operation_id: operation.id,
+              vault_id: operation.vault_id,
+              attempts: updated.attemptCount,
+              failure_code: updated.failureCode,
+            }))
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          const nextAttempt = Number(operation.attempt_count) + 1
+          const nonRetryable = /contract|notactive|disputed|paused|deadline.?not.?reached/i.test(message)
+          const terminal = nonRetryable || nextAttempt >= maxAttempts
+          const updated = await recordSettlementAttemptFailure(
+            operation.id,
+            nonRetryable ? 'CONTRACT_REJECTED' : terminal ? 'RETRY_LIMIT_EXCEEDED' : 'NETWORK_ERROR',
+            message.slice(0, 2000) || 'Soroban submission failed',
+            terminal,
+            trx,
+          )
+          if (terminal) {
+            console.error(JSON.stringify({
+              level: 'alert',
+              message: 'settlement_operation_dead_lettered',
+              operation_id: operation.id,
+              vault_id: operation.vault_id,
+              attempts: updated.attemptCount,
+              failure_code: updated.failureCode,
+            }))
+          }
+        }
+      }
+    })
   }
 
   jobHandlers['oracle.call'] = async (payload, context) => {
