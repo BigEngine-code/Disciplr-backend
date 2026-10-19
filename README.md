@@ -57,6 +57,22 @@ npm run seed:demo               # optional: explicitly insert demo fixtures
 
 Without `DATABASE_URL`, non-production uses an in-memory demo store (data resets on restart or cold start); production fails closed. `STORE_MODE=memory` explicitly opts into demo mode. With a database URL, connection failures return 503 with `Retry-After` and later requests retry; they never switch to demo memory. The real `vaults`, `milestones` and `activity_log` tables are owned by migrations. Store initialization only checks connectivity and never seeds or rewrites rows. Run `npm run seed:demo` explicitly to insert demo fixtures; repeated runs preserve existing vaults and their children. Production seeding refuses to run unless `--force` is passed (`npm run seed:demo -- --force`).
 
+### Running API Integration Tests Locally
+
+The integration tests under `api/__tests__/` test the deployed serverless API routes against either a real Postgres database or the fallback in-memory store.
+
+1. **Against local Postgres (via Docker):**
+   ```bash
+   docker run -d --name disciplr-postgres -e POSTGRES_PASSWORD=password -e POSTGRES_DB=disciplr_test -p 5432:5432 postgres:16
+   DATABASE_URL=postgres://postgres:password@localhost:5432/disciplr_test npm run migrate:latest
+   DATABASE_URL=postgres://postgres:password@localhost:5432/disciplr_test npm run test:api
+   ```
+
+2. **Against the in-memory store:**
+   ```bash
+   npm run test:api
+   ```
+
 Full service (optional): `npm run dev` (needs the variables documented in `docs/configuration.md`). Tests: `npm test`. OpenAPI for the full service: `npm run openapi:generate`.
 
 ## Environment variables
