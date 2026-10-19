@@ -37,6 +37,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run openapi:check
+      - run: npm run openapi:validate-deployed
       - run: npm test
         env:
           NODE_ENV: test
