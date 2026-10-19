@@ -2,8 +2,7 @@
 import express from 'express'
 import cors from 'cors'
 import { randomBytes } from 'node:crypto'
-import { getStore as defaultGetStore } from '../apilib/store.mjs'
-import { checkReadiness, isDatabaseUnavailable } from '../apilib/store-bootstrap.mjs'
+import { getStore, StoreConflictError } from '../apilib/store.mjs'
 import { OPENAPI } from '../apilib/openapi.mjs'
 import { OnchainError, isEnabled, getConfig, getServer, buildCreateVaultTx, buildStakeTx, verifySignedTx, txHashOf, submitAndWait, validateForChain } from '../apilib/soroban.mjs'
 import { safeCompare, expireOverdueVaults } from '../apilib/expiry.mjs'
@@ -25,11 +24,145 @@ export function createApp(getStore = defaultGetStore) {
     console.error('API request failed')
     res.status(500).json({ error: 'Internal error' })
   })
+  if (errs.length) return res.status(400).json({ error: 'Validation failed', details: errs })
+  const id = 'vault-' + hex(6)
+  milestones.forEach((m, i) => { m.id = `${id}-m${i + 1}`; delete m._i })
+  const now = new Date().toISOString()
+  const s = await getStore()
+  const vault = {
+    id, name: String(b.name || '').trim().slice(0, 200) || `Vault ${amount}`, creator: b.creator, amount: String(amount), status: 'active', startDate: start.toISOString(), endDate: end.toISOString(),
+    verifier: b.verifier, successDestination: STELLAR.test(b.successDestination || '') ? b.successDestination : b.creator,
+    failureDestination: STELLAR.test(b.failureDestination || '') ? b.failureDestination : b.verifier,
+    createdAt: now, updatedAt: now, milestones,
+  }
+  await s.createVault(vault)
+  await s.addActivity({ id: crypto.randomUUID(), type: 'create', vaultId: id, amount: vault.amount, status: 'confirmed', hash: hex(32), memo: 'Vault created', createdAt: now })
+  res.status(201).json({ data: vault })
+}))
 
-  const router = express.Router()
+// Verifier validates a milestone. When every milestone is validated the vault completes and funds release.
+router.post('/vaults/:id/milestones/:mid/validate', wrap(async (req, res) => {
+  const s = await getStore()
+  const vault = await s.getVault(req.params.id)
+  if (!vault) return bad(res, 'Vault not found', 404)
+  if (req.body?.verifier !== vault.verifier) return bad(res, 'Only the vault verifier may validate milestones', 403)
+  const target = vault.milestones.find((x) => x.id === req.params.mid)
+  if (!target) return bad(res, 'Milestone not found', 404)
+  if (vault.status !== 'active') return bad(res, `Vault is ${vault.status}`, 409)
+  if (target.status === 'completed') return bad(res, 'Milestone already validated', 409)
+  if (target.status === 'failed' || target.status === 'cancelled') return bad(res, `Milestone is ${target.status}`, 409)
 
-  router.get('/health', (_req, res) => {
-    res.json({ status: 'ok', service: 'disciplr-api', time: new Date().toISOString() })
+  try {
+    const result = await s.transition(vault.id, async (current) => {
+      const liveVault = current
+      if (!liveVault) return { conflict: true, error: 'Vault not found', vaultStatus: 'active', milestoneUpdates: [], activities: [] }
+      if (liveVault.status !== 'active') return { conflict: true, error: `Vault is ${liveVault.status}`, vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+      const milestone = liveVault.milestones.find((m) => m.id === req.params.mid)
+      if (!milestone) return { conflict: true, error: 'Milestone not found', vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+      if (milestone.status === 'completed') return { conflict: true, error: 'Milestone already validated', vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+      if (milestone.status === 'failed' || milestone.status === 'cancelled') return { conflict: true, error: `Milestone is ${milestone.status}`, vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+
+      const updatedMilestone = { ...milestone, status: 'completed' }
+      const milestoneUpdates = [{ id: updatedMilestone.id, status: 'completed' }]
+      const activities = [{
+        id: crypto.randomUUID(),
+        type: 'validate',
+        vaultId: liveVault.id,
+        amount: updatedMilestone.amount,
+        status: 'confirmed',
+        hash: hex(32),
+        memo: `Milestone validated: ${updatedMilestone.title}`,
+        createdAt: new Date().toISOString(),
+      }]
+
+      let vaultStatus = liveVault.status
+      if (liveVault.milestones.every((m) => m.id === updatedMilestone.id || m.status === 'completed')) {
+        vaultStatus = 'completed'
+        activities.push({
+          id: crypto.randomUUID(),
+          type: 'release',
+          vaultId: liveVault.id,
+          amount: liveVault.amount,
+          status: 'confirmed',
+          hash: hex(32),
+          memo: 'Funds released to success destination',
+          createdAt: new Date(Date.now() + 1).toISOString(),
+        })
+      }
+      return { vaultStatus, milestoneUpdates, activities }
+    })
+
+    if (!result) return bad(res, 'Vault not found', 404)
+    res.json({ data: result.vault })
+  } catch (error) {
+    if (error instanceof StoreConflictError) return bad(res, error.message, 409)
+    throw error
+  }
+}))
+
+// Verifier (or creator) declares failure: funds redirect to the failure destination.
+router.post('/vaults/:id/fail', wrap(async (req, res) => {
+  const s = await getStore()
+  const vault = await s.getVault(req.params.id)
+  if (!vault) return bad(res, 'Vault not found', 404)
+  if (req.body?.verifier !== vault.verifier) return bad(res, 'Only the vault verifier may fail a vault', 403)
+  if (vault.status !== 'active') return bad(res, `Vault is ${vault.status}`, 409)
+
+  try {
+    const result = await s.transition(vault.id, async (current) => {
+      const liveVault = current
+      if (!liveVault) return { conflict: true, error: 'Vault not found', vaultStatus: 'active', milestoneUpdates: [], activities: [] }
+      if (liveVault.status !== 'active') return { conflict: true, error: `Vault is ${liveVault.status}`, vaultStatus: liveVault.status, milestoneUpdates: [], activities: [] }
+      const milestoneUpdates = liveVault.milestones.map((m) => ({
+        id: m.id,
+        status: m.status === 'completed' ? 'completed' : 'failed',
+      }))
+      return {
+        vaultStatus: 'failed',
+        milestoneUpdates,
+        activities: [{
+          id: crypto.randomUUID(),
+          type: 'redirect',
+          vaultId: liveVault.id,
+          amount: liveVault.amount,
+          status: 'confirmed',
+          hash: hex(32),
+          memo: 'Funds redirected to failure destination',
+          createdAt: new Date().toISOString(),
+        }],
+      }
+    })
+
+    if (!result) return bad(res, 'Vault not found', 404)
+    res.json({ data: result.vault })
+  } catch (error) {
+    if (error instanceof StoreConflictError) return bad(res, error.message, 409)
+    throw error
+  }
+}))
+
+router.get('/transactions', wrap(async (req, res) => {
+  const s = await getStore()
+  const data = await s.listActivity({ vaultId: req.query.vaultId })
+  res.json({ data, count: data.length })
+}))
+
+router.get('/stats', wrap(async (req, res) => {
+  const s = await getStore()
+  const vaults = await s.listVaults({ creator: req.query.creator })
+  const sum = (f) => vaults.filter(f).reduce((a, v) => a + Number(v.amount), 0)
+  const done = vaults.filter((v) => v.status !== 'active')
+  res.json({
+    data: {
+      totalVaults: vaults.length,
+      active: vaults.filter((v) => v.status === 'active').length,
+      completed: vaults.filter((v) => v.status === 'completed').length,
+      failed: vaults.filter((v) => v.status === 'failed').length,
+      totalLocked: sum((v) => v.status === 'active'),
+      totalReleased: sum((v) => v.status === 'completed'),
+      totalRedirected: sum((v) => v.status === 'failed'),
+      successRate: done.length ? Math.round((vaults.filter((v) => v.status === 'completed').length / done.length) * 100) : null,
+    },
   })
   router.get('/ready', wrap(async (_req, res) => {
     res.json({ status: 'ok', ...await checkReadiness(await getStore()) })
