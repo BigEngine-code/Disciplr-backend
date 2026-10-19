@@ -149,30 +149,31 @@ describeDb('expired vault settlement ledger', () => {
       milestoneId: 'expiry-settlement-ms-success',
     })
 
-    it('recovers a pending operation committed before the worker ran', async () => {
-      await insertVault(vaultIds.expired, new Date('2020-02-01T00:00:00Z'), 'failed')
-      await insertMilestone('expiry-settlement-ms-crash', vaultIds.expired, 'pending')
-      const operation = await createSettlementOperation({
-        vaultId: vaultIds.expired,
-        targetMilestoneId: 'expiry-settlement-ms-crash',
-        operationKey: `slash_on_miss:${vaultIds.expired}`,
-        operationType: 'redirect',
-        requestedBy: 'expiry-settlement-test',
-        destination: 'GFAILUREXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-        amount: '1000.0000000',
-      })
-
-      await runSettlementJob()
-
-      const recovered = await testDb('settlement_operations').where({ id: operation.id }).first()
-      expect(submitSlashMock).toHaveBeenCalledTimes(1)
-      expect(recovered).toMatchObject({ status: 'confirmed', attempt_count: 1 })
-    })
     expect(operation).toMatchObject({
       status: 'confirmed',
       transaction_hash: 'expiryTxHash123456789',
       attempt_count: 1,
     })
+  })
+
+  it('recovers a pending operation committed before the worker ran', async () => {
+    await insertVault(vaultIds.expired, new Date('2020-02-01T00:00:00Z'), 'failed')
+    await insertMilestone('expiry-settlement-ms-crash', vaultIds.expired, 'pending')
+    const operation = await createSettlementOperation({
+      vaultId: vaultIds.expired,
+      targetMilestoneId: 'expiry-settlement-ms-crash',
+      operationKey: `slash_on_miss:${vaultIds.expired}`,
+      operationType: 'redirect',
+      requestedBy: 'expiry-settlement-test',
+      destination: 'GFAILUREXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+      amount: '1000.0000000',
+    })
+
+    await runSettlementJob()
+
+    const recovered = await testDb('settlement_operations').where({ id: operation.id }).first()
+    expect(submitSlashMock).toHaveBeenCalledTimes(1)
+    expect(recovered).toMatchObject({ status: 'confirmed', attempt_count: 1 })
   })
 
   it('permanently fails contract rejections without changing the vault status again', async () => {
