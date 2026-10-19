@@ -4,6 +4,7 @@ import cors from 'cors'
 import { randomBytes } from 'node:crypto'
 import { getStore } from '../apilib/store.mjs'
 import { OPENAPI } from '../apilib/openapi.mjs'
+import { safeCompare, expireOverdueVaults } from '../apilib/expiry.mjs'
 
 const app = express()
 app.disable('x-powered-by')
@@ -82,8 +83,19 @@ router.post('/vaults/:id/milestones/:mid/validate', wrap(async (req, res) => {
   const m = v.milestones.find((x) => x.id === req.params.mid)
   if (!m) return bad(res, 'Milestone not found', 404)
   if (m.status === 'completed') return bad(res, 'Milestone already validated', 409)
+
+  const currentTime = req._now || req.query.now || req.headers['x-test-now']
+    ? new Date(req._now || req.query.now || req.headers['x-test-now'])
+    : new Date()
+  if (currentTime > new Date(v.endDate)) {
+    return bad(res, 'Vault deadline has passed', 409)
+  }
+  if (currentTime > new Date(m.dueDate)) {
+    return bad(res, 'Milestone due date has passed', 409)
+  }
+
   m.status = 'completed'
-  const now = new Date().toISOString()
+  const now = currentTime.toISOString()
   await s.addActivity({ id: crypto.randomUUID(), type: 'validate', vaultId: v.id, amount: m.amount, status: 'confirmed', hash: hex(32), memo: `Milestone validated: ${m.title}`, createdAt: now })
   if (v.milestones.every((x) => x.status === 'completed')) {
     v.status = 'completed'
@@ -130,6 +142,27 @@ router.get('/stats', wrap(async (req, res) => {
       successRate: done.length ? Math.round((vaults.filter((v) => v.status === 'completed').length / done.length) * 100) : null,
     },
   })
+}))
+
+router.get('/cron/expire-vaults', wrap(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+
+  const cronSecret = process.env.CRON_SECRET
+  if (!cronSecret) {
+    return res.status(503).json({ error: 'Service Unavailable: CRON_SECRET is not configured' })
+  }
+
+  const authHeader = req.headers.authorization || ''
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+  if (!token || !safeCompare(token, cronSecret)) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const now = req._now || req.query.now
+  const batchSize = req.query.limit ? parseInt(req.query.limit, 10) : 100
+
+  const result = await expireOverdueVaults({ now, batchSize })
+  res.json({ processed: result.processed, remaining: result.remaining })
 }))
 
 app.use(['/api/v1', '/api'], router)
