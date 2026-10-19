@@ -83,6 +83,29 @@ export const OPENAPI = {
         },
       },
     },
+    '/cron/expire-vaults': {
+      get: {
+        operationId: 'expireOverdueVaults',
+        summary: 'Protected cron endpoint to fail overdue active vaults and pending milestones',
+        parameters: [
+          { name: 'limit', in: 'query', required: false, schema: { type: 'integer' }, description: 'Batch size limit' },
+          { name: 'now', in: 'query', required: false, schema: { type: 'string', format: 'date-time' }, description: 'Simulated current timestamp' },
+        ],
+        responses: {
+          200: {
+            description: 'Batch expiry execution summary',
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/CronExpiryResult' },
+                example: { processed: 2, remaining: 0 },
+              },
+            },
+          },
+          401: err,
+          503: err,
+        },
+      },
+    },
     '/vaults': {
       get: {
         operationId: 'listVaults',
@@ -726,6 +749,15 @@ export const OPENAPI = {
         additionalProperties: false,
         properties: {
           data: { $ref: '#/components/schemas/Stats' },
+        },
+      },
+      CronExpiryResult: {
+        type: 'object',
+        required: ['processed', 'remaining'],
+        additionalProperties: false,
+        properties: {
+          processed: { type: 'integer', example: 2 },
+          remaining: { type: 'integer', example: 0 },
         },
       },
       CreateMilestoneRequest: {

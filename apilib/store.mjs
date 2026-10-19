@@ -3,9 +3,11 @@
 //   `npm run migrate:latest`, and `activity_log`, all owned by migrations).
 // - Explicit memory mode or non-production without a URL uses demo memory.
 // - Postgres failures and production without a URL fail closed.
+import { randomUUID, randomBytes } from 'node:crypto'
 import { createStoreProvider } from './store-bootstrap.mjs'
 import { seed } from './demo-data.mjs'
 const iso = (d) => new Date(d).toISOString()
+const hex = (n) => randomBytes(n).toString('hex')
 
 export class MemoryStore {
   kind = 'memory'
@@ -24,6 +26,36 @@ export class MemoryStore {
   }
   async getActivityByHash(hash) { return this.activity.find((a) => a.hash === hash) || null }
   async saveActivity(a) { return a }
+  async expireOverdueVaults({ now = new Date(), batchSize = 100 } = {}) {
+    const nowDate = new Date(now)
+    const overdue = this.vaults
+      .filter((v) => v.status === 'active' && !v.deletedAt && new Date(v.endDate) < nowDate)
+      .sort((a, b) => new Date(a.endDate) - new Date(b.endDate))
+
+    const batch = overdue.slice(0, batchSize)
+    for (const v of batch) {
+      v.status = 'failed'
+      v.updatedAt = iso(nowDate)
+      for (const m of v.milestones) {
+        if (m.status !== 'completed') {
+          m.status = 'failed'
+        }
+      }
+      this.activity.push({
+        id: randomUUID(),
+        type: 'redirect',
+        vaultId: v.id,
+        amount: v.amount,
+        status: 'simulated',
+        hash: hex(32),
+        memo: 'Deadline passed',
+        createdAt: iso(nowDate),
+      })
+    }
+
+    const remaining = overdue.length - batch.length
+    return { processed: batch.length, remaining: Math.max(0, remaining) }
+  }
 }
 
 export class PgStore {
@@ -98,6 +130,77 @@ export class PgStore {
       ? await this.pool.query('SELECT * FROM activity_log WHERE vault_id=$1 ORDER BY created_at DESC LIMIT 200', [vaultId])
       : await this.pool.query('SELECT * FROM activity_log ORDER BY created_at DESC LIMIT 200')
     return rows.map((r) => this.actRow(r))
+  }
+  async expireOverdueVaults({ now = new Date(), batchSize = 100 } = {}) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const nowDate = new Date(now)
+      const nowIso = iso(nowDate)
+
+      // Lock up to batchSize active overdue vaults using SKIP LOCKED for concurrent safety
+      const { rows: vaults } = await client.query(
+        `SELECT id, amount FROM vaults
+         WHERE status = 'active'::vault_status
+           AND end_date < $1
+           AND deleted_at IS NULL
+         ORDER BY end_date ASC
+         LIMIT $2
+         FOR UPDATE SKIP LOCKED`,
+        [nowIso, batchSize],
+      )
+
+      if (vaults.length > 0) {
+        const vaultIds = vaults.map((v) => v.id)
+
+        // Mark vaults failed
+        await client.query(
+          `UPDATE vaults
+           SET status = 'failed'::vault_status, updated_at = $1
+           WHERE id = ANY($2)`,
+          [nowIso, vaultIds],
+        )
+
+        // Mark non-completed milestones failed
+        await client.query(
+          `UPDATE milestones
+           SET status = 'failed'::milestone_status, updated_at = $1
+           WHERE vault_id = ANY($2)
+             AND status <> 'completed'::milestone_status
+             AND deleted_at IS NULL`,
+          [nowIso, vaultIds],
+        )
+
+        // Insert redirect activity row for each expired vault
+        for (const v of vaults) {
+          const actId = randomUUID()
+          const actHash = hex(32)
+          await client.query(
+            `INSERT INTO activity_log (id, type, vault_id, amount, status, hash, memo, created_at)
+             VALUES ($1, 'redirect', $2, $3, 'simulated', $4, 'Deadline passed', $5)`,
+            [actId, v.id, v.amount, actHash, nowIso],
+          )
+        }
+      }
+
+      // Count remaining active overdue vaults
+      const { rows: remRows } = await client.query(
+        `SELECT count(*)::int AS remaining
+         FROM vaults
+         WHERE status = 'active'::vault_status
+           AND end_date < $1
+           AND deleted_at IS NULL`,
+        [nowIso],
+      )
+
+      await client.query('COMMIT')
+      return { processed: vaults.length, remaining: remRows[0]?.remaining || 0 }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
   }
 }
 

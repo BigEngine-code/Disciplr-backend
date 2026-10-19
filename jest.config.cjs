@@ -65,11 +65,13 @@ module.exports = {
     "<rootDir>/src/tests/docs.disasterRecovery.test.ts",
     // node:test API integration suites, run via `npm run test:api`
     "<rootDir>/api/__tests__/contract.test.mjs",
+    "<rootDir>/api/__tests__/expiry.test.mjs",
     "<rootDir>/api/__tests__/fail.test.mjs",
     "<rootDir>/apilib/__tests__/openapi.spec.test.mjs",
     "<rootDir>/api/__tests__/health.test.mjs",
     "<rootDir>/api/__tests__/stats.test.mjs",
     "<rootDir>/api/__tests__/transactions.test.mjs",
+    "<rootDir>/api/__tests__/validate.deadline.test.mjs",
     "<rootDir>/api/__tests__/validate.test.mjs",
     "<rootDir>/api/__tests__/vaults.test.mjs",
     // vitest (imports describe/it/expect/vi from 'vitest', which collides
