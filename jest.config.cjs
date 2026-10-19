@@ -20,7 +20,7 @@ module.exports = {
     ],
   },
   setupFiles: ["<rootDir>/jest.setup.cjs"],
-  testMatch: ["**/tests/**/*.test.ts", "**/src/**/*.test.ts"],
+  testMatch: ["**/tests/**/*.test.ts", "**/src/**/*.test.ts", "**/{apilib,api,db}/__tests__/*.test.mjs"],
   // These suites are written against a different test runner than the one
   // `npm test` uses (Jest): most target Bun's test runner (they import
   // 'bun:test' and/or call the ambient `mock.module()` API that Bun injects
@@ -63,6 +63,17 @@ module.exports = {
     "<rootDir>/src/tests/apiKeyScopes.test.ts",
     "<rootDir>/src/tests/apiKeys.usageAnalytics.test.ts",
     "<rootDir>/src/tests/docs.disasterRecovery.test.ts",
+    // node:test API integration suites, run via `npm run test:api`
+    "<rootDir>/api/__tests__/contract.test.mjs",
+    "<rootDir>/api/__tests__/expiry.test.mjs",
+    "<rootDir>/api/__tests__/fail.test.mjs",
+    "<rootDir>/apilib/__tests__/openapi.spec.test.mjs",
+    "<rootDir>/api/__tests__/health.test.mjs",
+    "<rootDir>/api/__tests__/stats.test.mjs",
+    "<rootDir>/api/__tests__/transactions.test.mjs",
+    "<rootDir>/api/__tests__/validate.deadline.test.mjs",
+    "<rootDir>/api/__tests__/validate.test.mjs",
+    "<rootDir>/api/__tests__/vaults.test.mjs",
     // vitest (imports describe/it/expect/vi from 'vitest', which collides
     // with Jest's own globals/expect instance when loaded in the same
     // worker — "Cannot redefine property: Symbol($$jest-matchers-object)")

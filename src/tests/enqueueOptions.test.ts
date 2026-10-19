@@ -72,6 +72,7 @@ describe('Jobs API Zod Validation - POST /api/jobs/enqueue', () => {
       'outbox.relay': { batchSize: 10 },
       'embeddings.reindex': { batchSize: 25, maxBatchesPerRun: 5 },
       'saved-search.evaluate': { searchId: 'search-1', batchSize: 10 },
+      'settlement.process': { batchSize: 20 },
     }
 
     for (const jobType of JOB_TYPES) {

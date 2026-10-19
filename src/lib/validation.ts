@@ -225,6 +225,12 @@ export const enqueueJobSchema = z.discriminatedUnion('type', [
     maxAttempts: z.number().int().min(1).max(10).optional(),
     delayMs: z.number().int().min(0).max(60000).optional(),
   }),
+  z.object({
+    type: z.literal('settlement.process'),
+    payload: z.object({ batchSize: z.number().int().min(1).max(100).optional() }),
+    maxAttempts: z.number().int().min(1).max(10).optional(),
+    delayMs: z.number().int().min(0).max(60000).optional(),
+  }),
 ])
 
 export interface ValidationErrorField {

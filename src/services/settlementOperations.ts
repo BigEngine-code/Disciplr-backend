@@ -7,7 +7,9 @@ export type SettlementOperationStatus = 'pending' | 'submitted' | 'confirmed' | 
 
 export interface SettlementOperation {
   id: string
-  milestoneId: string
+  milestoneId: string | null
+  vaultId: string | null
+  targetMilestoneId: string | null
   operationKey: string
   operationType: SettlementOperationType
   status: SettlementOperationStatus
@@ -24,7 +26,9 @@ export interface SettlementOperation {
 }
 
 export interface CreateSettlementOperationInput {
-  milestoneId: string
+  milestoneId?: string | null
+  vaultId?: string | null
+  targetMilestoneId?: string | null
   operationKey: string
   operationType: SettlementOperationType
   requestedBy: string
@@ -79,7 +83,8 @@ export class SettlementOperationLedger {
   create(input: CreateSettlementOperationInput): SettlementOperation {
     assertInput(input)
     const fingerprint = fingerprintFor(input)
-    const identity = `${input.milestoneId.trim()}:${input.operationKey}`
+    const scopeId = (input.vaultId ?? input.milestoneId)!.trim()
+    const identity = `${input.vaultId ? 'vault' : 'milestone'}:${scopeId}:${input.operationKey}`
     const existingId = this.identities.get(identity)
     if (existingId) {
       const existing = this.operations.get(existingId)!
@@ -92,7 +97,9 @@ export class SettlementOperationLedger {
     const timestamp = nowIso()
     const operation: SettlementOperation = {
       id: randomUUID(),
-      milestoneId: input.milestoneId.trim(),
+      milestoneId: input.milestoneId?.trim() ?? null,
+      vaultId: input.vaultId?.trim() ?? null,
+      targetMilestoneId: input.targetMilestoneId?.trim() ?? null,
       operationKey: input.operationKey,
       operationType: input.operationType,
       status: 'pending',
@@ -195,7 +202,10 @@ export class SettlementOperationLedger {
     this.identities.clear()
     for (const operation of snapshot) {
       this.operations.set(operation.id, { ...operation })
-      this.identities.set(`${operation.milestoneId}:${operation.operationKey}`, operation.id)
+      const scope = operation.vaultId
+        ? `vault:${operation.vaultId}`
+        : `milestone:${operation.milestoneId}`
+      this.identities.set(`${scope}:${operation.operationKey}`, operation.id)
     }
   }
 
@@ -220,7 +230,6 @@ const assertInput = (input: CreateSettlementOperationInput): void => {
     throw new SettlementOperationError('INVALID_INPUT', 'Settlement operation input is required')
   }
   for (const [name, value] of Object.entries({
-    milestoneId: input.milestoneId,
     operationKey: input.operationKey,
     requestedBy: input.requestedBy,
     destination: input.destination,
@@ -229,6 +238,16 @@ const assertInput = (input: CreateSettlementOperationInput): void => {
     if (typeof value !== 'string' || value.trim() === '') {
       throw new SettlementOperationError('INVALID_INPUT', `${name} must be a non-empty string`)
     }
+  }
+  if ((input.milestoneId == null) === (input.vaultId == null)) {
+    throw new SettlementOperationError('INVALID_INPUT', 'Exactly one of milestoneId or vaultId is required')
+  }
+  const scopeId = input.vaultId ?? input.milestoneId
+  if (typeof scopeId !== 'string' || scopeId.trim() === '') {
+    throw new SettlementOperationError('INVALID_INPUT', 'Settlement scope ID must be a non-empty string')
+  }
+  if (input.vaultId && (!input.targetMilestoneId || !input.targetMilestoneId.trim())) {
+    throw new SettlementOperationError('INVALID_INPUT', 'targetMilestoneId is required for vault settlements')
   }
   if (!OPERATION_KEY_RE.test(input.operationKey)) {
     throw new SettlementOperationError('INVALID_INPUT', 'operationKey has an invalid format')
@@ -244,7 +263,9 @@ const assertInput = (input: CreateSettlementOperationInput): void => {
 const fingerprintFor = (input: CreateSettlementOperationInput): string =>
   createHash('sha256')
     .update(JSON.stringify({
-      milestoneId: input.milestoneId.trim(),
+      milestoneId: input.milestoneId?.trim() ?? null,
+      vaultId: input.vaultId?.trim() ?? null,
+      targetMilestoneId: input.targetMilestoneId?.trim() ?? null,
       operationType: input.operationType,
       destination: input.destination.trim(),
       amount: input.amount.trim(),
@@ -254,7 +275,9 @@ const fingerprintFor = (input: CreateSettlementOperationInput): string =>
 
 type SettlementOperationRow = {
   id: string
-  milestone_id: string
+  milestone_id: string | null
+  vault_id: string | null
+  target_milestone_id: string | null
   operation_key: string
   operation_type: SettlementOperationType
   status: SettlementOperationStatus
@@ -263,7 +286,7 @@ type SettlementOperationRow = {
   failure_code: string | null
   failure_message: string | null
   requested_by: string
-  request_fingerprint: string
+  request_fingerprint: string | Record<string, unknown>
   created_at: Date | string
   updated_at: Date | string
   submitted_at: Date | string | null
@@ -276,6 +299,8 @@ const iso = (value: Date | string | null): string | null =>
 const mapRow = (row: SettlementOperationRow): SettlementOperation => ({
   id: row.id,
   milestoneId: row.milestone_id,
+  vaultId: row.vault_id,
+  targetMilestoneId: row.target_milestone_id,
   operationKey: row.operation_key,
   operationType: row.operation_type,
   status: row.status,
@@ -286,7 +311,7 @@ const mapRow = (row: SettlementOperationRow): SettlementOperation => ({
   requestedBy: row.requested_by,
   requestFingerprint: typeof row.request_fingerprint === 'string'
     ? row.request_fingerprint
-    : JSON.stringify(row.request_fingerprint),
+    : String(row.request_fingerprint.fingerprint ?? JSON.stringify(row.request_fingerprint)),
   createdAt: iso(row.created_at)!,
   updatedAt: iso(row.updated_at)!,
   submittedAt: iso(row.submitted_at),
@@ -297,11 +322,15 @@ const clientFor = (trx?: Knex.Transaction): Knex => (trx ?? db) as Knex
 
 const fetchByIdentity = async (
   client: Knex,
-  milestoneId: string,
+  input: CreateSettlementOperationInput,
   operationKey: string,
-): Promise<SettlementOperationRow | undefined> => client('settlement_operations')
-  .where({ milestone_id: milestoneId, operation_key: operationKey })
-  .first()
+): Promise<SettlementOperationRow | undefined> => {
+  const scopeColumn = input.vaultId ? 'vault_id' : 'milestone_id'
+  const scopeId = input.vaultId ?? input.milestoneId!
+  return client('settlement_operations')
+    .where({ [scopeColumn]: scopeId.trim(), operation_key: operationKey })
+    .first()
+}
 
 const fetchById = async (
   client: Knex,
@@ -324,21 +353,24 @@ export const createSettlementOperation = async (
   assertInput(input)
   const client = clientFor(trx)
   const fingerprint = fingerprintFor(input)
-
+  const scopeColumn = input.vaultId ? 'vault_id' : 'milestone_id'
+  const scopeId = (input.vaultId ?? input.milestoneId)!.trim()
   await client('settlement_operations')
     .insert({
-      milestone_id: input.milestoneId.trim(),
+      [scopeColumn]: scopeId,
+      target_milestone_id: input.targetMilestoneId?.trim() ?? null,
       operation_key: input.operationKey,
       operation_type: input.operationType,
       requested_by: input.requestedBy.trim(),
       request_fingerprint: fingerprint,
     })
-    .onConflict(['milestone_id', 'operation_key'])
+    .onConflict([scopeColumn, 'operation_key'])
     .ignore()
 
-  const row = await fetchByIdentity(client, input.milestoneId.trim(), input.operationKey)
+  const row = await fetchByIdentity(client, input, input.operationKey)
   if (!row) throw new SettlementOperationError('NOT_FOUND', 'Settlement operation was not created')
-  if (row.request_fingerprint !== fingerprint) {
+  if (row.request_fingerprint !== fingerprint ||
+    row.target_milestone_id !== (input.targetMilestoneId?.trim() ?? null)) {
     throw new SettlementOperationError(
       'IDENTITY_CONFLICT',
       'operationKey is already bound to a different settlement request',
@@ -362,12 +394,13 @@ export const getSettlementOperation = async (operationId: string): Promise<Settl
 export const markSettlementSubmitted = async (
   operationId: string,
   transactionHash: string,
+  transaction?: Knex.Transaction,
 ): Promise<SettlementOperation> => {
   if (!TX_HASH_RE.test(transactionHash)) {
     throw new SettlementOperationError('INVALID_INPUT', 'transactionHash has an invalid format')
   }
 
-  return db.transaction(async (trx) => {
+  const update = async (trx: Knex.Transaction): Promise<SettlementOperation> => {
     const row = await fetchById(trx, operationId, true)
     if (!row) throw new SettlementOperationError('NOT_FOUND', 'Settlement operation not found')
     if (row.status === 'confirmed') return mapRow(row)
@@ -396,15 +429,17 @@ export const markSettlementSubmitted = async (
       .returning('*')
     if (!updated) throw new SettlementOperationError('INVALID_STATE', 'Operation changed during submission')
     return mapRow(updated)
-  })
+  }
+  return transaction ? update(transaction) : db.transaction(update)
 }
 
 /** A callback may confirm only the exact submitted transaction. */
 export const confirmSettlementOperation = async (
   operationId: string,
   transactionHash: string,
+  transaction?: Knex.Transaction,
 ): Promise<SettlementOperation> => {
-  return db.transaction(async (trx) => {
+  const update = async (trx: Knex.Transaction): Promise<SettlementOperation> => {
     const row = await fetchById(trx, operationId, true)
     if (!row) throw new SettlementOperationError('NOT_FOUND', 'Settlement operation not found')
     if (row.status === 'confirmed') {
@@ -426,7 +461,8 @@ export const confirmSettlementOperation = async (
       .returning('*')
     if (!updated) throw new SettlementOperationError('INVALID_STATE', 'Operation changed during confirmation')
     return mapRow(updated)
-  })
+  }
+  return transaction ? update(transaction) : db.transaction(update)
 }
 
 /** Record a recoverable failure without losing the operation identity. */
@@ -434,6 +470,7 @@ export const failSettlementOperation = async (
   operationId: string,
   failureCode: string,
   failureMessage: string,
+  transaction?: Knex.Transaction,
 ): Promise<SettlementOperation> => {
   if (!/^[A-Z][A-Z0-9_:-]{1,63}$/.test(failureCode)) {
     throw new SettlementOperationError('INVALID_INPUT', 'failureCode has an invalid format')
@@ -441,15 +478,15 @@ export const failSettlementOperation = async (
   if (!failureMessage.trim() || failureMessage.length > 2000) {
     throw new SettlementOperationError('INVALID_INPUT', 'failureMessage must contain 1–2000 characters')
   }
-  return db.transaction(async (trx) => {
+  const update = async (trx: Knex.Transaction): Promise<SettlementOperation> => {
     const row = await fetchById(trx, operationId, true)
     if (!row) throw new SettlementOperationError('NOT_FOUND', 'Settlement operation not found')
     if (row.status === 'failed') return mapRow(row)
-    if (row.status !== 'submitted') {
-      throw new SettlementOperationError('INVALID_STATE', 'Only a submitted operation can fail')
+    if (row.status !== 'submitted' && row.status !== 'pending') {
+      throw new SettlementOperationError('INVALID_STATE', 'Only a pending or submitted operation can fail')
     }
     const [updated] = await trx('settlement_operations')
-      .where({ id: operationId, status: 'submitted' })
+      .where({ id: operationId, status: row.status })
       .update({
         status: 'failed',
         failure_code: failureCode,
@@ -459,5 +496,38 @@ export const failSettlementOperation = async (
       .returning('*')
     if (!updated) throw new SettlementOperationError('INVALID_STATE', 'Operation changed during failure recording')
     return mapRow(updated)
-  })
+  }
+  return transaction ? update(transaction) : db.transaction(update)
+}
+
+export const recordSettlementAttemptFailure = async (
+  operationId: string,
+  failureCode: string,
+  failureMessage: string,
+  terminal: boolean,
+  transaction: Knex.Transaction,
+): Promise<SettlementOperation> => {
+  if (!/^[A-Z][A-Z0-9_:-]{1,63}$/.test(failureCode)) {
+    throw new SettlementOperationError('INVALID_INPUT', 'failureCode has an invalid format')
+  }
+  if (!failureMessage.trim() || failureMessage.length > 2000) {
+    throw new SettlementOperationError('INVALID_INPUT', 'failureMessage must contain 1–2000 characters')
+  }
+  const row = await fetchById(transaction, operationId, true)
+  if (!row) throw new SettlementOperationError('NOT_FOUND', 'Settlement operation not found')
+  if (row.status !== 'pending') {
+    throw new SettlementOperationError('INVALID_STATE', 'Only a pending operation can record a submission failure')
+  }
+  const [updated] = await transaction('settlement_operations')
+    .where({ id: operationId, status: 'pending' })
+    .update({
+      status: terminal ? 'failed' : 'pending',
+      attempt_count: Number(row.attempt_count) + 1,
+      failure_code: failureCode,
+      failure_message: failureMessage.trim(),
+      updated_at: new Date(),
+    })
+    .returning('*')
+  if (!updated) throw new SettlementOperationError('INVALID_STATE', 'Operation changed during failure recording')
+  return mapRow(updated)
 }

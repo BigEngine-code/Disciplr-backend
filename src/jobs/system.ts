@@ -49,6 +49,7 @@ const REGISTERED_JOB_TYPES: readonly JobType[] = [
   'milestone.reminders.deferred',
   'retention.purge',
   'saved-search.evaluate',
+  'settlement.process',
 ]
 
 const assertJobId = (jobId: string): void => {
@@ -464,6 +465,20 @@ export class BackgroundJobSystem {
       immediate: false,
       execute: () => {
         this.enqueue('saved-search.evaluate', {})
+      },
+    })
+
+    const settlementProcessIntervalMs = parsePositiveInteger(
+      process.env.SETTLEMENT_PROCESS_INTERVAL_MS,
+      30_000,
+    )
+    this.schedulerRegistry.registerJob({
+      name: 'settlement.process',
+      intervalMs: settlementProcessIntervalMs,
+      immediate: true,
+      initialDelayMs: 2_000,
+      execute: () => {
+        this.enqueue('settlement.process', { batchSize: 20 })
       },
     })
 

@@ -1,10 +1,11 @@
 // Data store for the deployed Disciplr API.
 // - If DATABASE_URL is set, uses Postgres (the real `vaults` / `milestones` tables created by
-//   `npm run migrate:latest`, plus an `activity_log` table created on first use).
-// - Otherwise falls back to an in-memory demo store (state resets on cold start).
+//   `npm run migrate:latest`, and `activity_log`, all owned by migrations).
+// - Explicit memory mode or non-production without a URL uses demo memory.
+// - Postgres failures and production without a URL fail closed.
 import { randomUUID, randomBytes } from 'node:crypto'
-
-const DAY = 86400000
+import { createStoreProvider } from './store-bootstrap.mjs'
+import { seed } from './demo-data.mjs'
 const iso = (d) => new Date(d).toISOString()
 const hex = (n) => randomBytes(n).toString('hex')
 
@@ -119,32 +120,52 @@ class MemoryStore {
   async listActivity({ vaultId } = {}) {
     return this.activity.filter((a) => !vaultId || a.vaultId === vaultId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   }
+  async getActivityByHash(hash) { return this.activity.find((a) => a.hash === hash) || null }
+  async saveActivity(a) { return a }
+  async expireOverdueVaults({ now = new Date(), batchSize = 100 } = {}) {
+    const nowDate = new Date(now)
+    const overdue = this.vaults
+      .filter((v) => v.status === 'active' && !v.deletedAt && new Date(v.endDate) < nowDate)
+      .sort((a, b) => new Date(a.endDate) - new Date(b.endDate))
+
+    const batch = overdue.slice(0, batchSize)
+    for (const v of batch) {
+      v.status = 'failed'
+      v.updatedAt = iso(nowDate)
+      for (const m of v.milestones) {
+        if (m.status !== 'completed') {
+          m.status = 'failed'
+        }
+      }
+      this.activity.push({
+        id: randomUUID(),
+        type: 'redirect',
+        vaultId: v.id,
+        amount: v.amount,
+        status: 'simulated',
+        hash: hex(32),
+        memo: 'Deadline passed',
+        createdAt: iso(nowDate),
+      })
+    }
+
+    const remaining = overdue.length - batch.length
+    return { processed: batch.length, remaining: Math.max(0, remaining) }
+  }
 }
 
-class PgStore {
+export class PgStore {
   kind = 'postgres'
   constructor(pool) { this.pool = pool }
   async init() {
-    await this.pool.query(`CREATE TABLE IF NOT EXISTS activity_log (
-      id uuid PRIMARY KEY, type text NOT NULL, vault_id text NOT NULL, amount numeric(36,7) NOT NULL DEFAULT 0,
-      status text NOT NULL DEFAULT 'confirmed', hash text NOT NULL, memo text, created_at timestamptz NOT NULL DEFAULT now())`)
-    await this.pool.query('ALTER TABLE vaults ADD COLUMN IF NOT EXISTS name varchar(200)')
-    for (const v of seed().vaults) {
-      await this.pool.query('UPDATE vaults SET name=$2 WHERE id=$1 AND name IS NULL', [v.id, v.name])
-      await this.pool.query('UPDATE vaults SET creator=$2, verifier=$3, success_destination=$4, failure_destination=$5 WHERE id=$1 AND creator<>$2',
-        [v.id, v.creator, v.verifier, v.successDestination, v.failureDestination])
-    }
-    const { rows } = await this.pool.query('SELECT count(*)::int AS n FROM vaults')
-    if (rows[0].n === 0) {
-      const s = seed()
-      for (const v of s.vaults) await this.createVault(v)
-      for (const a of s.activity) await this.addActivity(a)
-    }
+    await this.pool.query('SELECT 1')
   }
+
   rowToVault(r, ms) {
     return {
       id: r.id, name: r.name || `Vault ${r.id}`, creator: r.creator, amount: String(Number(r.amount)), status: r.status, startDate: iso(r.start_date), endDate: iso(r.end_date),
       verifier: r.verifier, successDestination: r.success_destination, failureDestination: r.failure_destination,
+      onchainStatus: r.onchain_status || null,
       createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
       milestones: ms.filter((m) => m.vault_id === r.id).sort((a, b) => a.sort_order - b.sort_order)
         .map((m) => ({ id: m.id, title: m.title, amount: String(Number(m.amount)), dueDate: iso(m.due_date || m.deadline), status: m.status })),
@@ -169,9 +190,9 @@ class PgStore {
     const c = await this.pool.connect()
     try {
       await c.query('BEGIN')
-      await c.query(`INSERT INTO vaults (id, name, creator, amount, start_date, end_date, verifier, success_destination, failure_destination, status, created_at, updated_at)
-        VALUES ($1,$11,$2,$3,$4,$5,$6,$7,$8,$9::vault_status,$10,$10)`,
-      [v.id, v.creator, v.amount, v.startDate, v.endDate, v.verifier, v.successDestination, v.failureDestination, v.status, v.createdAt, v.name])
+      await c.query(`INSERT INTO vaults (id, name, creator, amount, start_date, end_date, verifier, success_destination, failure_destination, status, created_at, updated_at, onchain_status)
+        VALUES ($1,$11,$2,$3,$4,$5,$6,$7,$8,$9::vault_status,$10,$10,$12)`,
+      [v.id, v.creator, v.amount, v.startDate, v.endDate, v.verifier, v.successDestination, v.failureDestination, v.status, v.createdAt, v.name, v.onchainStatus || null])
       let i = 0
       for (const m of v.milestones) {
         await c.query(`INSERT INTO milestones (id, vault_id, title, target_amount, amount, deadline, due_date, status, sort_order)
@@ -182,13 +203,22 @@ class PgStore {
     return v
   }
   async saveVault(v) {
-    await this.pool.query('UPDATE vaults SET status=$2::vault_status, updated_at=now() WHERE id=$1', [v.id, v.status])
+    await this.pool.query('UPDATE vaults SET status=$2::vault_status, onchain_status=$3, updated_at=now() WHERE id=$1', [v.id, v.status, v.onchainStatus || null])
     for (const m of v.milestones) await this.pool.query('UPDATE milestones SET status=$2::milestone_status, updated_at=now() WHERE id=$1', [m.id, m.status])
     return v
   }
   async addActivity(a) {
-    await this.pool.query('INSERT INTO activity_log (id,type,vault_id,amount,status,hash,memo,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-      [a.id, a.type, a.vaultId, a.amount, a.status, a.hash, a.memo, a.createdAt])
+    await this.pool.query('INSERT INTO activity_log (id,type,vault_id,amount,status,hash,memo,created_at,ledger) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+      [a.id, a.type, a.vaultId, a.amount, a.status, a.hash, a.memo, a.createdAt, a.ledger ?? null])
+    return a
+  }
+  actRow(r) { return { id: r.id, type: r.type, vaultId: r.vault_id, amount: String(Number(r.amount)), status: r.status, hash: r.hash, memo: r.memo, ledger: r.ledger == null ? null : Number(r.ledger), createdAt: iso(r.created_at) } }
+  async getActivityByHash(hash) {
+    const { rows } = await this.pool.query('SELECT * FROM activity_log WHERE hash=$1 LIMIT 1', [hash])
+    return rows[0] ? this.actRow(rows[0]) : null
+  }
+  async saveActivity(a) {
+    await this.pool.query('UPDATE activity_log SET status=$2, memo=$3, ledger=$4 WHERE id=$1', [a.id, a.status, a.memo, a.ledger ?? null])
     return a
   }
   async addActivityTx(client, a) {
@@ -259,32 +289,79 @@ class PgStore {
     const { rows } = vaultId
       ? await this.pool.query('SELECT * FROM activity_log WHERE vault_id=$1 ORDER BY created_at DESC LIMIT 200', [vaultId])
       : await this.pool.query('SELECT * FROM activity_log ORDER BY created_at DESC LIMIT 200')
-    return rows.map((r) => ({ id: r.id, type: r.type, vaultId: r.vault_id, amount: String(Number(r.amount)), status: r.status, hash: r.hash, memo: r.memo, createdAt: iso(r.created_at) }))
+    return rows.map((r) => this.actRow(r))
   }
-}
+  async expireOverdueVaults({ now = new Date(), batchSize = 100 } = {}) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const nowDate = new Date(now)
+      const nowIso = iso(nowDate)
 
-let storePromise
-export function getStore() {
-  if (!storePromise) {
-    storePromise = (async () => {
-      let store
-      const url = process.env.DATABASE_URL
-      if (url) {
-        try {
-          const pg = (await import('pg')).default
-          const pool = new pg.Pool({ connectionString: url, max: 3, ssl: /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: false } })
-          store = new PgStore(pool)
-          await store.init()
-        } catch (e) {
-          console.error('Postgres unavailable, falling back to in-memory store:', e.message)
-          store = null
+      // Lock up to batchSize active overdue vaults using SKIP LOCKED for concurrent safety
+      const { rows: vaults } = await client.query(
+        `SELECT id, amount FROM vaults
+         WHERE status = 'active'::vault_status
+           AND end_date < $1
+           AND deleted_at IS NULL
+         ORDER BY end_date ASC
+         LIMIT $2
+         FOR UPDATE SKIP LOCKED`,
+        [nowIso, batchSize],
+      )
+
+      if (vaults.length > 0) {
+        const vaultIds = vaults.map((v) => v.id)
+
+        // Mark vaults failed
+        await client.query(
+          `UPDATE vaults
+           SET status = 'failed'::vault_status, updated_at = $1
+           WHERE id = ANY($2)`,
+          [nowIso, vaultIds],
+        )
+
+        // Mark non-completed milestones failed
+        await client.query(
+          `UPDATE milestones
+           SET status = 'failed'::milestone_status, updated_at = $1
+           WHERE vault_id = ANY($2)
+             AND status <> 'completed'::milestone_status
+             AND deleted_at IS NULL`,
+          [nowIso, vaultIds],
+        )
+
+        // Insert redirect activity row for each expired vault
+        for (const v of vaults) {
+          const actId = randomUUID()
+          const actHash = hex(32)
+          await client.query(
+            `INSERT INTO activity_log (id, type, vault_id, amount, status, hash, memo, created_at)
+             VALUES ($1, 'redirect', $2, $3, 'simulated', $4, 'Deadline passed', $5)`,
+            [actId, v.id, v.amount, actHash, nowIso],
+          )
         }
       }
-      if (!store) { store = new MemoryStore(); await store.init() }
-      return store
-    })()
+
+      // Count remaining active overdue vaults
+      const { rows: remRows } = await client.query(
+        `SELECT count(*)::int AS remaining
+         FROM vaults
+         WHERE status = 'active'::vault_status
+           AND end_date < $1
+           AND deleted_at IS NULL`,
+        [nowIso],
+      )
+
+      await client.query('COMMIT')
+      return { processed: vaults.length, remaining: remRows[0]?.remaining || 0 }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
   }
-  return storePromise
 }
 
 export async function resetStore() {
